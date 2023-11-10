@@ -5,7 +5,7 @@ from offsite_tuning.tasks import task_dict, map_dataset_name_and_config
 
 logger = logging.getLogger(__name__)
 
-
+#取数据集
 def get_raw_datasets(args):
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
     # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
@@ -63,7 +63,7 @@ def get_raw_datasets(args):
             )
     return raw_datasets
 
-
+#分词
 def get_tokenized_datasets(raw_datasets, args, accelerator, tokenizer, lm_type='clm'):
     # Preprocessing the datasets.
     # First we tokenize all the texts.
@@ -152,17 +152,20 @@ def get_lm_datasets(tokenized_datasets, args, accelerator, tokenizer, lm_type='c
 
 
 def process_text2text_datasets(raw_datasets, args, tokenizer, accelerator):
+    #获取任务相关信息：从`task_dict`中获取与`args.dataset_name`对应的任务信息。
     task = task_dict[args.dataset_name]
 
     column_names = raw_datasets["train"].column_names
 
+    
     def tokenize_function(examples):
+        #通过任务信息获得上下文(`context`)和目标(`target`)文本。
         context = task.get_context(examples)
         target = task.get_target(examples)
 
         context = tokenizer(context)
         target = tokenizer(target)
-
+        #分别对上下文和目标进行分词。如果上下文以特殊标记符(token)结尾，将其移除。如果目标以特殊标记符开头，则将其移除。
         # if context is ending with special token, remove it
         if len(context['input_ids'][0]) > 0 and context['input_ids'][0][-1] in tokenizer.all_special_ids:
             context['input_ids'] = [i[:-1] for i in context['input_ids']]
@@ -174,19 +177,19 @@ def process_text2text_datasets(raw_datasets, args, tokenizer, accelerator):
             target['input_ids'] = [i[1:] for i in target['input_ids']]
             target['attention_mask'] = [a[1:]
                                         for a in target['attention_mask']]
-
+        #将上下文和目标的分词结果拼接在一起，并创建相应的注意力掩码。
         out = {}
         out['input_ids'] = [i1 + i2 for i1,
                             i2 in zip(context['input_ids'], target['input_ids'])]
         out['attention_mask'] = [a1 + a2 for a1,
                                  a2 in zip(context['attention_mask'], target['attention_mask'])]
-
+        #为上下文标记设定标签，值为-100，以便在训练时模型不会预测上下文中的标记。
         # set -100 for context tokens
         out["labels"] = [
             [-100] * len(i1) + i2 for i1, i2 in zip(context['input_ids'], target['input_ids'])]
 
         return out
-
+    #并行处理和分词：使用`raw_datasets`数据集对象的`map`方法对数据集进行分词，并行处理以提高处理速度。
     with accelerator.main_process_first():
         tokenized_datasets = raw_datasets.map(
             tokenize_function,
@@ -212,11 +215,15 @@ def process_text2text_datasets(raw_datasets, args, tokenizer, accelerator):
     block_size = _get_block_size(args, tokenizer)
     max_length = min(max_length, block_size)
 
+    #该函数对分词后的数据进行填充，使其达到最大长度。
     def pad_function(examples):
+        #首先，将`input_ids`列表中的每个实例补充到最大长度，并在末尾添加填充标记（通过`tokenizer.pad_token_id`获取）。
         examples["input_ids"] = [i + [tokenizer.pad_token_id] *
                                  (max_length - len(i)) for i in examples["input_ids"]]
+        #然后，在`attention_mask`中为每个实例添加相应的注意力掩码。
         examples["attention_mask"] = [[1] * len(i) + [0] *
                                       (max_length - len(i)) for i in examples["attention_mask"]]
+        #最后，将`labels`列表中的每个实例补充到最大长度，并在末尾添加填充标记-100，同时截断超过最大长度的部分。
         examples["labels"] = [i + [-100] *
                               (max_length - len(i)) for i in examples["labels"]]
         # truncate to max_length
@@ -225,7 +232,7 @@ def process_text2text_datasets(raw_datasets, args, tokenizer, accelerator):
                                       for a in examples["attention_mask"]]
         examples["labels"] = [l[:max_length] for l in examples["labels"]]
         return examples
-
+    #并行填充处理：使用`tokenized_datasets`数据集对象的`map`方法对数据集进行填充处理，并行处理以提高处理速度。
     with accelerator.main_process_first():
         tokenized_datasets = tokenized_datasets.map(
             pad_function,
